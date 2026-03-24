@@ -1,5 +1,5 @@
 # Velrix 自动续期
-自动登录 velrix.net，每24小时续期服务器。
+自动登录 velrix.net，每5天续期服务器。
 流程：填写用户名 → 获取邮件 OTP → 验证 → TG 通知
 ---
 ## Secrets 配置
