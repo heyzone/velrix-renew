@@ -176,6 +176,24 @@ def do_renew(sb) -> None:
     print(f"✅ 已输入用户名: {VELRIX_USERNAME}")
     time.sleep(0.5)
 
+    # ── 关闭 Cookie 同意横幅 ──────────────────────────────────
+    print("🍪 检查并关闭 Cookie 横幅...")
+    cookie_selectors = [
+        '//button[.//span[contains(text(),"Accept all")]]',
+        '//button[contains(normalize-space(),"Accept all")]',
+        '//button[contains(normalize-space(),"Accept All")]',
+        '//button[contains(@data-slot,"base") and contains(.,"Accept")]',
+    ]
+    for sel in cookie_selectors:
+        try:
+            if sb.is_element_visible(sel):
+                sb.click(sel)
+                print("✅ 已关闭 Cookie 横幅")
+                time.sleep(0.5)
+                break
+        except Exception:
+            continue
+
     # 点击 Continue 按钮
     print("🖱️  点击 Continue ...")
     continue_clicked = False
