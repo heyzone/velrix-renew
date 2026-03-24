@@ -109,7 +109,6 @@ def fetch_otp_from_gmail(wait_seconds: int = 90) -> str:
                 status, _ = mail.select(folder)
                 if status != "OK":
                     continue
-                # 只搜索 velrix 发来的邮件
                 _, data = mail.uid("search", None, 'FROM "velrix"')
                 all_uids  = set(data[0].split())
                 new_uids  = all_uids - seen_uids[folder]
@@ -136,7 +135,6 @@ def fetch_otp_from_gmail(wait_seconds: int = 90) -> str:
                     else:
                         body = msg.get_payload(decode=True).decode("utf-8", errors="ignore")
 
-                    # 匹配 6 位数字验证码
                     otp_match = re.search(r'\b(\d{6})\b', body)
                     if otp_match:
                         code = otp_match.group(1)
@@ -153,77 +151,80 @@ def fetch_otp_from_gmail(wait_seconds: int = 90) -> str:
 
 
 # ============================================================
-# 关闭隐私弹窗（页面加载后立即出现，必须最先处理）
+# 关闭隐私弹窗
 # ============================================================
 
 def dismiss_privacy_modal(sb) -> None:
     """
-    点击「Your privacy, your choices」弹窗里的 Accept all 按钮。
-    按钮 HTML: <button data-slot="base" class="... bg-info ..."> Accept all ...</button>
-    找不到弹窗则静默跳过。
+    弹窗结构：role="dialog"，三个按钮 class 完全相同（都含 bg-info），
+    只能靠 textContent 区分。用 JS 遍历所有按钮，找 textContent 含
+    'Accept all' 的那个并 click()。
     """
-    print("🍪 检查隐私弹窗...")
+    print("🍪 等待隐私弹窗...")
 
-    # 最多等 10 秒让弹窗出现
-    for _ in range(10):
+    # 等最多 15 秒让弹窗出现
+    modal_found = False
+    for _ in range(15):
         try:
             found = sb.execute_script("""
-                return (function() {
-                    var btns = document.querySelectorAll('button[data-slot="base"]');
-                    for (var i = 0; i < btns.length; i++) {
-                        if (btns[i].classList.contains('bg-info') &&
-                            btns[i].innerText.trim().startsWith('Accept')) {
-                            return true;
-                        }
-                    }
-                    return false;
-                })();
+                return !!document.querySelector('[role="dialog"]');
             """)
             if found:
+                modal_found = True
                 break
         except Exception:
             pass
         time.sleep(1)
 
-    # 优先用 JS 直接点击（绕过任何遮挡/z-index 问题）
-    try:
-        clicked = sb.execute_script("""
-            return (function() {
-                var btns = document.querySelectorAll('button[data-slot="base"]');
-                for (var i = 0; i < btns.length; i++) {
-                    if (btns[i].classList.contains('bg-info') &&
-                        btns[i].innerText.trim().startsWith('Accept')) {
-                        btns[i].click();
-                        return true;
-                    }
+    if not modal_found:
+        print("ℹ️  未检测到隐私弹窗，跳过")
+        return
+
+    print("🍪 检测到弹窗，尝试点击 Accept all ...")
+
+    # JS 精确匹配 textContent 含 'Accept all' 的按钮
+    clicked = sb.execute_script("""
+        return (function() {
+            var btns = document.querySelectorAll('button[data-slot="base"]');
+            for (var i = 0; i < btns.length; i++) {
+                var txt = btns[i].textContent.replace(/\\s+/g, ' ').trim();
+                if (txt.indexOf('Accept all') !== -1) {
+                    btns[i].click();
+                    return 'clicked: ' + txt;
                 }
-                return false;
+            }
+            // 备用：遍历所有 button
+            var allBtns = document.querySelectorAll('button');
+            for (var j = 0; j < allBtns.length; j++) {
+                var t = allBtns[j].textContent.replace(/\\s+/g, ' ').trim();
+                if (t.indexOf('Accept all') !== -1) {
+                    allBtns[j].click();
+                    return 'fallback clicked: ' + t;
+                }
+            }
+            return null;
+        })();
+    """)
+
+    if clicked:
+        print(f"✅ 隐私弹窗已关闭（{clicked}）")
+        time.sleep(1.5)  # 等待弹窗动画消失
+    else:
+        print("⚠️  未找到 Accept all 按钮，尝试强制移除弹窗 DOM ...")
+        # 最后兜底：直接把 dialog 和 overlay 从 DOM 删掉
+        sb.execute_script("""
+            (function() {
+                var dialog = document.querySelector('[role="dialog"]');
+                if (dialog) dialog.remove();
+                var overlay = document.querySelector('[data-slot="overlay"]');
+                if (overlay) overlay.remove();
+                // 恢复 body 滚动
+                document.body.style.overflow = '';
+                document.body.style.pointerEvents = '';
             })();
         """)
-        if clicked:
-            print("✅ 隐私弹窗已关闭（JS click）")
-            time.sleep(1)
-            return
-    except Exception:
-        pass
-
-    # JS 失败则降级用 XPath/CSS
-    fallback_selectors = [
-        '//button[@data-slot="base" and contains(@class,"bg-info") and contains(.,"Accept")]',
-        '//button[contains(@class,"bg-info") and contains(normalize-space(),"Accept all")]',
-        '//button[contains(normalize-space(),"Accept all")]',
-    ]
-    for sel in fallback_selectors:
-        try:
-            if sb.is_element_visible(sel):
-                sb.click(sel)
-                print(f"✅ 隐私弹窗已关闭（XPath）")
-                time.sleep(1)
-                return
-        except Exception:
-            continue
-
-    print("ℹ️  未检测到隐私弹窗，跳过")
+        print("✅ 弹窗 DOM 已强制移除")
+        time.sleep(0.5)
 
 
 # ============================================================
@@ -236,7 +237,7 @@ def do_renew(sb) -> None:
     time.sleep(3)
     sb.save_screenshot("velrix_renew_open.png")
 
-    # ── 最优先：关闭隐私弹窗（在任何交互之前）────────────────
+    # ── 最优先：关闭隐私弹窗 ─────────────────────────────────
     dismiss_privacy_modal(sb)
     sb.save_screenshot("velrix_after_privacy.png")
 
