@@ -133,19 +133,22 @@ def fetch_otp_from_gmail(wait_seconds: int = 90) -> str:
             match = re.search(r'"([^"]+)"\s*$', decoded) or re.search(r'(\S+)\s*$', decoded)
             if match:
                 spam_folder = match.group(1).strip('"')
-                print("🗑️  找到垃圾邮件文件夹，一并监控")
                 break
 
     folders_to_check = ["INBOX"] + ([spam_folder] if spam_folder else [])
 
+    # 关键修复：seen_uids 基线只记录已有的 velrix 邮件 UID
+    # 避免把 ALL 邮件当基线导致 velrix 新邮件被漏掉，
+    # 也避免把非 velrix 旧邮件算进去干扰计算
     seen_uids: dict[str, set] = {}
     for folder in folders_to_check:
         try:
             status, _ = mail.select(folder)
             if status != "OK":
                 raise Exception(f"select 失败: {status}")
-            _, data = mail.uid("search", None, "ALL")
+            _, data = mail.uid("search", None, 'FROM "velrix"')
             seen_uids[folder] = set(data[0].split())
+            print(f"📂 {folder} 已有 velrix 邮件: {len(seen_uids[folder])} 封")
         except Exception as e:
             print(f"⚠️  初始化文件夹 {folder} 出错: {e}")
             seen_uids[folder] = set()
@@ -161,11 +164,17 @@ def fetch_otp_from_gmail(wait_seconds: int = 90) -> str:
                 all_uids = set(data[0].split())
                 new_uids = all_uids - seen_uids[folder]
 
+                if new_uids:
+                    print(f"📩 {folder} 发现 {len(new_uids)} 封新邮件，解析中...")
+
                 for uid in new_uids:
                     seen_uids[folder].add(uid)
                     _, msg_data = mail.uid("fetch", uid, "(RFC822)")
                     raw = msg_data[0][1]
                     msg = email.message_from_bytes(raw)
+
+                    subject = msg.get("Subject", "")
+                    print(f"   📧 主题: {subject}")
 
                     body = ""
                     if msg.is_multipart():
@@ -189,6 +198,8 @@ def fetch_otp_from_gmail(wait_seconds: int = 90) -> str:
                         print(f"✅ Gmail OTP 获取成功: {code}")
                         mail.logout()
                         return code
+                    else:
+                        print(f"   ⚠️  未找到6位数字，邮件内容片段: {body[:120].strip()}")
 
             except Exception as e:
                 print(f"⚠️  轮询 {folder} 出错: {e}")
@@ -279,7 +290,6 @@ def wait_for_page_title(sb, keyword: str, timeout: int = 30) -> bool:
                 "(function(){ var h = document.querySelector('h2,h1'); return h ? h.innerText : ''; })()"
             )
             if h2 and keyword.lower() in h2.lower():
-                print(f"✅ 页面已切换: {h2.strip()}")
                 return True
         except Exception:
             pass
@@ -331,14 +341,10 @@ def click_button_human(sb, xpaths: list) -> bool:
             print(f"✅ ActionChains 点击成功: {sel}")
             return True
 
-        except Exception as e:
-            print(f"⚠️  ActionChains 失败 ({sel}): {e}，尝试 JS click ...")
+        except Exception:
             result = js_mouse_click(sb, sel)
             if result == "clicked":
-                print(f"✅ JS MouseEvent 点击成功: {sel}")
                 return True
-            else:
-                print(f"⚠️  JS click 结果: {result}")
             continue
     return False
 
@@ -378,12 +384,10 @@ def do_renew(sb) -> None:
     print("🔄 打开续期页面...")
     sb.open(RENEW_URL)
     time.sleep(3)
-    save_debug(sb, "renew_open")
 
     dismiss_privacy_modal(sb)
-    save_debug(sb, "after_privacy")
 
-    # ── Step 1：输入用户名 ────────────────────────────────────
+    # ── Step 1：输入用户名
     print("📝 等待用户名输入框...")
     try:
         sb.wait_for_element_visible('input#username', timeout=20)
@@ -400,7 +404,7 @@ def do_renew(sb) -> None:
     print(f"✅ 已输入用户名: {VELRIX_USERNAME}")
     human_delay(0.8, 1.5)   # 输入完等一会儿再点按钮
 
-    # 点击 Continue（ActionChains + JS 双保险）
+    # 点击 Continue（JS 双保险）
     print("🖱️  点击 Continue ...")
     continue_xpaths = [
         '//button[.//span[contains(text(),"Continue")]]',
@@ -414,11 +418,32 @@ def do_renew(sb) -> None:
         send_tg("❌ Continue 按钮未找到")
         return
 
-    # 立刻保存点击后状态（关键调试点）
+    # 点击后等待并检测页面状态
     time.sleep(2)
-    save_debug(sb, "after_click_continue")
 
-    # 检测是否有错误提示（用户名不存在等）
+    # 优先检测"不可续期"提示（冷却时间未到）
+    not_available = sb.execute_script("""
+(function(){
+    var keywords = ['not available', 'renew again', 'hour(s)', 'hours', '24 hour', 'cooldown', 'limit'];
+    var els = document.querySelectorAll('*');
+    for(var i=0;i<els.length;i++){
+        var t = (els[i].innerText || '').toLowerCase().trim();
+        if(t.length < 5 || t.length > 300) continue;
+        for(var k=0;k<keywords.length;k++){
+            if(t.indexOf(keywords[k]) !== -1) return els[i].innerText.trim();
+        }
+    }
+    return null;
+})()
+    """)
+    if not_available:
+        hours = re.search(r'(\d+)\s*hour', not_available, re.IGNORECASE)
+        wait_msg = f"⏳ 冷却中，约 {hours.group(1)} 小时后可续期" if hours else f"⏳ 暂不可续期: {not_available[:80]}"
+        print(wait_msg)
+        send_tg(wait_msg)
+        return
+
+    # 检测其他错误提示（用户名不存在等）
     err = get_page_error(sb)
     if err:
         print(f"❌ 点击 Continue 后页面报错: {err}")
@@ -426,13 +451,9 @@ def do_renew(sb) -> None:
         return
 
     # ── Step 2：等待页面切换到验证步骤 ───────────────────────
-    print("⏳ 等待「Verify Your Email」页面渲染（最长 40s）...")
-    if not wait_for_page_title(sb, "Verify", timeout=40):
-        print("⚠️  未检测到 Verify 标题，继续尝试查找 PIN 框...")
+    wait_for_page_title(sb, "Verify", timeout=40)
 
-    save_debug(sb, "after_continue")
-
-    # 等待 PIN 输入框（支持多种 selector）
+    # 等待 PIN 输入框
     pin_sel = None
     for sel in [
         'input[autocomplete="one-time-code"]',
@@ -456,7 +477,6 @@ def do_renew(sb) -> None:
         return
 
     print("✅ 验证码输入框已出现，开始获取 OTP ...")
-    save_debug(sb, "pin_ready")
 
     try:
         code = fetch_otp_from_gmail(wait_seconds=90)
@@ -466,47 +486,46 @@ def do_renew(sb) -> None:
         send_tg("❌ Gmail OTP 获取超时")
         return
 
-    # ── 填入验证码 ────────────────────────────────────────────
+    # ── 填入验证码（6格独立输入框，逐格 sendKeys）────────────
     print(f"⌨️  填入验证码: {code}")
-    for i, char in enumerate(code):
-        js = """
-(function() {
-    var inputs = document.querySelectorAll('input[aria-label*="pin"], input[autocomplete="one-time-code"]');
-    // 如果是单个大输入框，直接整体填
-    if (inputs.length === 1) {
-        var inp = inputs[0];
-        var nativeSetter = Object.getOwnPropertyDescriptor(
-            window.HTMLInputElement.prototype, 'value'
-        ).set;
-        nativeSetter.call(inp, 'FULL_CODE');
-        inp.dispatchEvent(new Event('input',  { bubbles: true }));
-        inp.dispatchEvent(new Event('change', { bubbles: true }));
-        return 'single-input';
-    }
-    // 多个小格子逐位填
-    var inp = inputs[INDEX];
-    if (!inp) return 'no-input-INDEX';
-    var nativeSetter = Object.getOwnPropertyDescriptor(
-        window.HTMLInputElement.prototype, 'value'
-    ).set;
-    nativeSetter.call(inp, 'CHAR');
-    inp.dispatchEvent(new Event('input',  { bubbles: true }));
-    inp.dispatchEvent(new Event('change', { bubbles: true }));
-    inp.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, key: 'CHAR' }));
-    inp.dispatchEvent(new KeyboardEvent('keyup',   { bubbles: true, key: 'CHAR' }));
-    return 'multi-input-INDEX';
-})()
-        """.replace("FULL_CODE", code).replace("INDEX", str(i)).replace("CHAR", char)
-        result = sb.execute_script(js)
-        # 如果是单输入框，只需执行一次
-        if result and result.startswith("single"):
-            print("✅ 单输入框模式，整体填入完成")
-            break
-        time.sleep(random.uniform(0.1, 0.2))
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.common.keys import Keys
 
-    print("✅ 验证码已填入")
+    pin_inputs = sb.driver.find_elements(By.CSS_SELECTOR, 'input[aria-label*="pin input"]')
+    if not pin_inputs:
+        # 兜底：所有 one-time-code input
+        pin_inputs = sb.driver.find_elements(By.CSS_SELECTOR, 'input[autocomplete="one-time-code"]')
+
+    if len(pin_inputs) >= 6:
+        for i, char in enumerate(code):
+            inp = pin_inputs[i]
+            inp.click()
+            time.sleep(0.05)
+            inp.send_keys(char)
+            time.sleep(random.uniform(0.08, 0.15))
+        print("✅ 验证码已填入（sendKeys 多格子模式）")
+    else:
+        # 兜底：JS nativeSetter 整体填入
+        sb.execute_script("""
+(function(){
+    var inputs = document.querySelectorAll('input[aria-label*="pin input"], input[autocomplete="one-time-code"]');
+    var code = CODE;
+    var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;
+    if(inputs.length === 1){
+        setter.call(inputs[0], code);
+        inputs[0].dispatchEvent(new Event('input',{bubbles:true}));
+        inputs[0].dispatchEvent(new Event('change',{bubbles:true}));
+    } else {
+        for(var i=0;i<inputs.length&&i<code.length;i++){
+            setter.call(inputs[i], code[i]);
+            inputs[i].dispatchEvent(new Event('input',{bubbles:true}));
+            inputs[i].dispatchEvent(new Event('change',{bubbles:true}));
+        }
+    }
+})()
+        """.replace("CODE", repr(code)))
+        print("✅ 验证码已填入（JS 兜底模式）")
     human_delay(0.5, 1.0)
-    save_debug(sb, "code_filled")
 
     # 点击 Verify Code
     print("🚀 点击 Verify Code ...")
@@ -552,8 +571,6 @@ def do_renew(sb) -> None:
                 break
         except Exception:
             continue
-
-    save_debug(sb, "result")
 
     if succeeded:
         print(f"✅ 续期完成，下次续期时间: {due_date}")
