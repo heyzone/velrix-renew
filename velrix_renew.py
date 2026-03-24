@@ -12,11 +12,11 @@ from seleniumbase import SB
 # ============================================================
 
 _account = os.environ["VELRIX_ACCOUNT"].split(",")
-VELRIX_USERNAME = _account[0].strip()          # Velrix 用户名
-GMAIL_ADDRESS   = _account[1].strip()          # Gmail 地址（接收验证码）
-GMAIL_PASSWORD  = _account[2].strip()          # Gmail App 密码
+VELRIX_USERNAME = _account[0].strip()
+GMAIL_ADDRESS   = _account[1].strip()
+GMAIL_PASSWORD  = _account[2].strip()
 
-LOCAL_PROXY  = "http://127.0.0.1:8080"   # GOST 本地转发地址（固定）
+LOCAL_PROXY  = "http://127.0.0.1:8080"
 RENEW_URL    = "https://www.velrix.net/flow/renew"
 
 _tg_raw = os.environ.get("TG_BOT", "")
@@ -67,14 +67,12 @@ def send_tg(result: str, due_date: str = None):
 # ============================================================
 
 def fetch_otp_from_gmail(wait_seconds: int = 90) -> str:
-    """等待并从 Gmail 读取 Velrix 发来的 6 位验证码"""
     print(f"📬 连接 Gmail，最长等待 {wait_seconds}s ...")
     deadline = time.time() + wait_seconds
 
     mail = imaplib.IMAP4_SSL("imap.gmail.com")
     mail.login(GMAIL_ADDRESS, GMAIL_PASSWORD)
 
-    # ── 找垃圾邮件文件夹 ─────────────────────────────────────
     spam_folder = None
     _, folder_list = mail.list()
     for f in folder_list:
@@ -88,7 +86,6 @@ def fetch_otp_from_gmail(wait_seconds: int = 90) -> str:
 
     folders_to_check = ["INBOX"] + ([spam_folder] if spam_folder else [])
 
-    # ── 记录初始 UID，避免读到旧邮件 ─────────────────────────
     seen_uids: dict[str, set] = {}
     for folder in folders_to_check:
         try:
@@ -101,7 +98,6 @@ def fetch_otp_from_gmail(wait_seconds: int = 90) -> str:
             print(f"⚠️  初始化文件夹 {folder} 出错: {e}")
             seen_uids[folder] = set()
 
-    # ── 轮询新邮件 ───────────────────────────────────────────
     while time.time() < deadline:
         time.sleep(5)
         for folder in folders_to_check:
@@ -151,25 +147,59 @@ def fetch_otp_from_gmail(wait_seconds: int = 90) -> str:
 
 
 # ============================================================
+# JS 辅助：所有脚本必须是表达式或 IIFE，不能有裸 return
+# ============================================================
+
+# 点击 Accept all —— 纯表达式，无 return
+_JS_CLICK_ACCEPT = """
+(function() {
+    var btns = document.querySelectorAll('button[data-slot="base"]');
+    for (var i = 0; i < btns.length; i++) {
+        var txt = btns[i].textContent.replace(/\\s+/g, ' ').trim();
+        if (txt.indexOf('Accept all') !== -1) {
+            btns[i].click();
+            return 'clicked:' + txt;
+        }
+    }
+    var all = document.querySelectorAll('button');
+    for (var j = 0; j < all.length; j++) {
+        var t = all[j].textContent.replace(/\\s+/g, ' ').trim();
+        if (t.indexOf('Accept all') !== -1) {
+            all[j].click();
+            return 'fallback:' + t;
+        }
+    }
+    return null;
+})()
+"""
+
+# 强制移除弹窗 DOM —— 语句块，无需返回值
+_JS_REMOVE_MODAL = """
+(function() {
+    var d = document.querySelector('[role="dialog"]');
+    if (d) d.remove();
+    var o = document.querySelector('[data-slot="overlay"]');
+    if (o) o.remove();
+    document.body.style.overflow = '';
+    document.body.style.pointerEvents = '';
+})()
+"""
+
+# 检测弹窗是否存在
+_JS_HAS_MODAL = '(function(){ return !!document.querySelector(\'[role="dialog"]\'); })()'
+
+
+# ============================================================
 # 关闭隐私弹窗
 # ============================================================
 
 def dismiss_privacy_modal(sb) -> None:
-    """
-    弹窗结构：role="dialog"，三个按钮 class 完全相同（都含 bg-info），
-    只能靠 textContent 区分。用 JS 遍历所有按钮，找 textContent 含
-    'Accept all' 的那个并 click()。
-    """
     print("🍪 等待隐私弹窗...")
 
-    # 等最多 15 秒让弹窗出现
     modal_found = False
     for _ in range(15):
         try:
-            found = sb.execute_script("""
-                return !!document.querySelector('[role="dialog"]');
-            """)
-            if found:
+            if sb.execute_script(_JS_HAS_MODAL):
                 modal_found = True
                 break
         except Exception:
@@ -181,50 +211,23 @@ def dismiss_privacy_modal(sb) -> None:
         return
 
     print("🍪 检测到弹窗，尝试点击 Accept all ...")
+    try:
+        result = sb.execute_script(_JS_CLICK_ACCEPT)
+        if result:
+            print(f"✅ 隐私弹窗已关闭（{result}）")
+            time.sleep(1.5)
+            return
+    except Exception as e:
+        print(f"⚠️  JS click 异常: {e}")
 
-    # JS 精确匹配 textContent 含 'Accept all' 的按钮
-    clicked = sb.execute_script("""
-        return (function() {
-            var btns = document.querySelectorAll('button[data-slot="base"]');
-            for (var i = 0; i < btns.length; i++) {
-                var txt = btns[i].textContent.replace(/\\s+/g, ' ').trim();
-                if (txt.indexOf('Accept all') !== -1) {
-                    btns[i].click();
-                    return 'clicked: ' + txt;
-                }
-            }
-            // 备用：遍历所有 button
-            var allBtns = document.querySelectorAll('button');
-            for (var j = 0; j < allBtns.length; j++) {
-                var t = allBtns[j].textContent.replace(/\\s+/g, ' ').trim();
-                if (t.indexOf('Accept all') !== -1) {
-                    allBtns[j].click();
-                    return 'fallback clicked: ' + t;
-                }
-            }
-            return null;
-        })();
-    """)
-
-    if clicked:
-        print(f"✅ 隐私弹窗已关闭（{clicked}）")
-        time.sleep(1.5)  # 等待弹窗动画消失
-    else:
-        print("⚠️  未找到 Accept all 按钮，尝试强制移除弹窗 DOM ...")
-        # 最后兜底：直接把 dialog 和 overlay 从 DOM 删掉
-        sb.execute_script("""
-            (function() {
-                var dialog = document.querySelector('[role="dialog"]');
-                if (dialog) dialog.remove();
-                var overlay = document.querySelector('[data-slot="overlay"]');
-                if (overlay) overlay.remove();
-                // 恢复 body 滚动
-                document.body.style.overflow = '';
-                document.body.style.pointerEvents = '';
-            })();
-        """)
+    # 兜底：强制移除弹窗 DOM
+    print("⚠️  JS click 无效，强制移除弹窗 DOM ...")
+    try:
+        sb.execute_script(_JS_REMOVE_MODAL)
         print("✅ 弹窗 DOM 已强制移除")
         time.sleep(0.5)
+    except Exception as e:
+        print(f"⚠️  DOM 移除也失败: {e}")
 
 
 # ============================================================
@@ -237,7 +240,6 @@ def do_renew(sb) -> None:
     time.sleep(3)
     sb.save_screenshot("velrix_renew_open.png")
 
-    # ── 最优先：关闭隐私弹窗 ─────────────────────────────────
     dismiss_privacy_modal(sb)
     sb.save_screenshot("velrix_after_privacy.png")
 
@@ -255,7 +257,7 @@ def do_renew(sb) -> None:
     print(f"✅ 已输入用户名: {VELRIX_USERNAME}")
     time.sleep(0.5)
 
-    # 点击 Continue 按钮
+    # 点击 Continue
     print("🖱️  点击 Continue ...")
     continue_clicked = False
     for sel in [
@@ -279,9 +281,8 @@ def do_renew(sb) -> None:
         send_tg("❌ Continue 按钮未找到")
         return
 
-    # ── Step 2：等待 PIN 输入框 & 读取 OTP ───────────────────
+    # ── Step 2：等待 PIN 输入框 ───────────────────────────────
     print("⏳ 等待「Verify Your Email」页面渲染（最长 30s）...")
-
     verify_page_ready = False
     for _ in range(30):
         time.sleep(1)
@@ -310,7 +311,6 @@ def do_renew(sb) -> None:
         try:
             with open("velrix_no_pin_source.html", "w", encoding="utf-8") as f:
                 f.write(sb.get_page_source())
-            print("📄 页面源码已保存到 velrix_no_pin_source.html")
         except Exception:
             pass
         send_tg("❌ PIN 输入框加载失败")
@@ -327,22 +327,22 @@ def do_renew(sb) -> None:
         send_tg("❌ Gmail OTP 获取超时")
         return
 
-    # 逐位填入 6 位验证码（使用 React 原生事件触发）
+    # 逐位填入验证码
     print(f"⌨️  填入验证码: {code}")
     for i, char in enumerate(code):
-        js = f"""
-        (function() {{
+        js = """
+        (function() {
             var inputs = document.querySelectorAll('input[aria-label^="pin input"]');
-            var inp = inputs[{i}];
+            var inp = inputs[INDEX];
             if (!inp) return;
             var nativeSetter = Object.getOwnPropertyDescriptor(
                 window.HTMLInputElement.prototype, 'value'
             ).set;
-            nativeSetter.call(inp, '{char}');
-            inp.dispatchEvent(new Event('input',  {{ bubbles: true }}));
-            inp.dispatchEvent(new Event('change', {{ bubbles: true }}));
-        }})();
-        """
+            nativeSetter.call(inp, 'CHAR');
+            inp.dispatchEvent(new Event('input',  { bubbles: true }));
+            inp.dispatchEvent(new Event('change', { bubbles: true }));
+        })()
+        """.replace("INDEX", str(i)).replace("CHAR", char)
         sb.execute_script(js)
         time.sleep(0.15)
 
@@ -350,7 +350,7 @@ def do_renew(sb) -> None:
     time.sleep(0.5)
     sb.save_screenshot("velrix_code_filled.png")
 
-    # 点击 Verify Code 按钮
+    # 点击 Verify Code
     print("🚀 点击 Verify Code ...")
     verify_clicked = False
     for sel in [
@@ -374,7 +374,7 @@ def do_renew(sb) -> None:
         send_tg("❌ Verify Code 按钮未找到")
         return
 
-    # ── Step 3：监控续期成功消息 ──────────────────────────────
+    # ── Step 3：等待续期结果 ──────────────────────────────────
     print("⏳ 等待续期结果...")
     due_date  = None
     succeeded = False
@@ -383,15 +383,15 @@ def do_renew(sb) -> None:
         time.sleep(0.5)
         try:
             desc_text = sb.execute_script("""
-                (function() {
-                    var els = document.querySelectorAll('div[data-slot="description"]');
-                    for (var i = 0; i < els.length; i++) {
-                        if (els[i].innerText.includes('renewed successfully')) {
-                            return els[i].innerText;
-                        }
-                    }
-                    return null;
-                })()
+(function() {
+    var els = document.querySelectorAll('div[data-slot="description"]');
+    for (var i = 0; i < els.length; i++) {
+        if (els[i].innerText.indexOf('renewed successfully') !== -1) {
+            return els[i].innerText;
+        }
+    }
+    return null;
+})()
             """)
             if desc_text:
                 print(f"🎉 续期成功消息: {desc_text}")
@@ -409,10 +409,10 @@ def do_renew(sb) -> None:
         send_tg("✅ 续期成功", due_date)
     else:
         error_msg = sb.execute_script("""
-            (function() {
-                var el = document.querySelector('[role="alert"], .error, [data-slot="description"]');
-                return el ? el.innerText : '（无法读取页面状态）';
-            })()
+(function() {
+    var el = document.querySelector('[role="alert"], .error, [data-slot="description"]');
+    return el ? el.innerText : '（无法读取页面状态）';
+})()
         """) or "（无法读取页面状态）"
         print(f"❌ 未检测到成功消息，页面提示: {error_msg}")
         send_tg(f"❌ 续期失败：{error_msg}")
@@ -424,11 +424,8 @@ def do_renew(sb) -> None:
 
 def run_script():
     print("🔧 启动浏览器...")
-
     with SB(uc=True, test=True, proxy=LOCAL_PROXY) as sb:
         print("🚀 浏览器就绪！")
-
-        # ── IP 验证 ──────────────────────────────────────────
         print("🌐 验证出口 IP ...")
         try:
             sb.open("https://api.ipify.org/?format=json")
@@ -437,7 +434,6 @@ def run_script():
             print(f"✅ 出口 IP：{ip_text}")
         except Exception:
             print("⚠️  IP 验证超时，跳过")
-
         do_renew(sb)
 
 
