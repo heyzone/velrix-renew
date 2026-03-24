@@ -201,14 +201,48 @@ def do_renew(sb) -> None:
         return
 
     # ── Step 2：等待 PIN 输入框 & 读取 OTP ───────────────────
-    print("⏳ 等待验证码输入框...")
+    print("⏳ 等待验证码输入框（最长 30s）...")
+
+    # 给页面充分的渲染时间
+    time.sleep(3)
+
+    # 截图 + 打印页面源码，帮助调试选择器
+    sb.save_screenshot("velrix_after_continue.png")
     try:
-        sb.wait_for_element_visible(
-            'input[aria-label="pin input 1 of 6"]', timeout=30
-        )
-    except Exception:
-        print("❌ PIN 输入框加载失败")
+        page_src = sb.get_page_source()
+        # 只打印包含 "pin" 或 "otp" 的行，避免刷屏
+        for line in page_src.splitlines():
+            if any(k in line.lower() for k in ["pin", "otp", "code", "verify", "input"]):
+                print("  [SRC]", line.strip()[:200])
+    except Exception as e:
+        print(f"⚠️  无法读取页面源码: {e}")
+
+    # 多种选择器逐一尝试
+    pin_found = False
+    pin_selectors = [
+        'input[aria-label="pin input 1 of 6"]',   # 原始
+        'input[aria-label^="pin input"]',           # 前缀匹配
+        'input[autocomplete="one-time-code"]',      # autocomplete 属性
+        'input[inputmode="text"][type="text"]',     # 通用 PIN 特征
+    ]
+    for sel in pin_selectors:
+        try:
+            sb.wait_for_element_visible(sel, timeout=8)
+            print(f"✅ PIN 输入框已找到（选择器: {sel}）")
+            pin_found = True
+            break
+        except Exception:
+            print(f"   ↳ 选择器未匹配: {sel}")
+
+    if not pin_found:
+        print("❌ PIN 输入框加载失败，已保存截图和页面源码")
         sb.save_screenshot("velrix_no_pin.png")
+        try:
+            with open("velrix_no_pin_source.html", "w", encoding="utf-8") as f:
+                f.write(sb.get_page_source())
+            print("📄 页面源码已保存到 velrix_no_pin_source.html")
+        except Exception:
+            pass
         send_tg("❌ PIN 输入框加载失败")
         return
 
