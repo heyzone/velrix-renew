@@ -153,6 +153,80 @@ def fetch_otp_from_gmail(wait_seconds: int = 90) -> str:
 
 
 # ============================================================
+# 关闭隐私弹窗（页面加载后立即出现，必须最先处理）
+# ============================================================
+
+def dismiss_privacy_modal(sb) -> None:
+    """
+    点击「Your privacy, your choices」弹窗里的 Accept all 按钮。
+    按钮 HTML: <button data-slot="base" class="... bg-info ..."> Accept all ...</button>
+    找不到弹窗则静默跳过。
+    """
+    print("🍪 检查隐私弹窗...")
+
+    # 最多等 10 秒让弹窗出现
+    for _ in range(10):
+        try:
+            found = sb.execute_script("""
+                return (function() {
+                    var btns = document.querySelectorAll('button[data-slot="base"]');
+                    for (var i = 0; i < btns.length; i++) {
+                        if (btns[i].classList.contains('bg-info') &&
+                            btns[i].innerText.trim().startsWith('Accept')) {
+                            return true;
+                        }
+                    }
+                    return false;
+                })();
+            """)
+            if found:
+                break
+        except Exception:
+            pass
+        time.sleep(1)
+
+    # 优先用 JS 直接点击（绕过任何遮挡/z-index 问题）
+    try:
+        clicked = sb.execute_script("""
+            return (function() {
+                var btns = document.querySelectorAll('button[data-slot="base"]');
+                for (var i = 0; i < btns.length; i++) {
+                    if (btns[i].classList.contains('bg-info') &&
+                        btns[i].innerText.trim().startsWith('Accept')) {
+                        btns[i].click();
+                        return true;
+                    }
+                }
+                return false;
+            })();
+        """)
+        if clicked:
+            print("✅ 隐私弹窗已关闭（JS click）")
+            time.sleep(1)
+            return
+    except Exception:
+        pass
+
+    # JS 失败则降级用 XPath/CSS
+    fallback_selectors = [
+        '//button[@data-slot="base" and contains(@class,"bg-info") and contains(.,"Accept")]',
+        '//button[contains(@class,"bg-info") and contains(normalize-space(),"Accept all")]',
+        '//button[contains(normalize-space(),"Accept all")]',
+    ]
+    for sel in fallback_selectors:
+        try:
+            if sb.is_element_visible(sel):
+                sb.click(sel)
+                print(f"✅ 隐私弹窗已关闭（XPath）")
+                time.sleep(1)
+                return
+        except Exception:
+            continue
+
+    print("ℹ️  未检测到隐私弹窗，跳过")
+
+
+# ============================================================
 # 主续期流程
 # ============================================================
 
@@ -161,6 +235,10 @@ def do_renew(sb) -> None:
     sb.open(RENEW_URL)
     time.sleep(3)
     sb.save_screenshot("velrix_renew_open.png")
+
+    # ── 最优先：关闭隐私弹窗（在任何交互之前）────────────────
+    dismiss_privacy_modal(sb)
+    sb.save_screenshot("velrix_after_privacy.png")
 
     # ── Step 1：输入用户名 ────────────────────────────────────
     print("📝 等待用户名输入框...")
@@ -175,24 +253,6 @@ def do_renew(sb) -> None:
     sb.type('input#username', VELRIX_USERNAME)
     print(f"✅ 已输入用户名: {VELRIX_USERNAME}")
     time.sleep(0.5)
-
-    # ── 关闭 Cookie 同意横幅 ──────────────────────────────────
-    print("🍪 检查并关闭 Cookie 横幅...")
-    cookie_selectors = [
-        '//button[.//span[contains(text(),"Accept all")]]',
-        '//button[contains(normalize-space(),"Accept all")]',
-        '//button[contains(normalize-space(),"Accept All")]',
-        '//button[contains(@data-slot,"base") and contains(.,"Accept")]',
-    ]
-    for sel in cookie_selectors:
-        try:
-            if sb.is_element_visible(sel):
-                sb.click(sel)
-                print("✅ 已关闭 Cookie 横幅")
-                time.sleep(0.5)
-                break
-        except Exception:
-            continue
 
     # 点击 Continue 按钮
     print("🖱️  点击 Continue ...")
@@ -221,7 +281,6 @@ def do_renew(sb) -> None:
     # ── Step 2：等待 PIN 输入框 & 读取 OTP ───────────────────
     print("⏳ 等待「Verify Your Email」页面渲染（最长 30s）...")
 
-    # 先轮询 h2 标题，确认 SPA 已切换到验证码步骤
     verify_page_ready = False
     for _ in range(30):
         time.sleep(1)
@@ -241,7 +300,6 @@ def do_renew(sb) -> None:
 
     sb.save_screenshot("velrix_after_continue.png")
 
-    # 等待 PIN 输入框出现（用 autocomplete="one-time-code" 最稳定）
     try:
         sb.wait_for_element_visible('input[autocomplete="one-time-code"]', timeout=15)
         print("✅ PIN 输入框已找到")
@@ -320,7 +378,7 @@ def do_renew(sb) -> None:
     due_date  = None
     succeeded = False
 
-    for _ in range(60):          # 最多等 30 秒
+    for _ in range(60):
         time.sleep(0.5)
         try:
             desc_text = sb.execute_script("""
@@ -336,7 +394,6 @@ def do_renew(sb) -> None:
             """)
             if desc_text:
                 print(f"🎉 续期成功消息: {desc_text}")
-                # 提取到期日期，例如 "Next renewal due: 2026/3/25"
                 date_match = re.search(r'Next renewal due[:\s]+(\S+)', desc_text)
                 due_date   = date_match.group(1) if date_match else desc_text.strip()
                 succeeded  = True
@@ -350,7 +407,6 @@ def do_renew(sb) -> None:
         print(f"✅ 续期完成，下次续期时间: {due_date}")
         send_tg("✅ 续期成功", due_date)
     else:
-        # 尝试读取任意错误提示
         error_msg = sb.execute_script("""
             (function() {
                 var el = document.querySelector('[role="alert"], .error, [data-slot="description"]');
