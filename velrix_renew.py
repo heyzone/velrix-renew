@@ -82,14 +82,36 @@ def human_delay(lo=0.6, hi=1.4):
     time.sleep(random.uniform(lo, hi))
 
 
-def js_mouse_click(sb, element):
-    """用 JS MouseEvent 触发点击，兼容 React/Vue 事件系统。"""
-    sb.execute_script("""
-        arguments[0].dispatchEvent(new MouseEvent('mouseover', {bubbles:true}));
-        arguments[0].dispatchEvent(new MouseEvent('mousedown', {bubbles:true}));
-        arguments[0].dispatchEvent(new MouseEvent('mouseup',   {bubbles:true}));
-        arguments[0].dispatchEvent(new MouseEvent('click',     {bubbles:true, cancelable:true}));
-    """, element)
+def js_mouse_click(sb, selector):
+    """用 JS MouseEvent 触发点击，兼容 React/Vue 事件系统。selector 为 CSS 选择器。"""
+    # 将 XPath 转为通过 document.evaluate 查找，CSS selector 直接用 querySelector
+    if selector.startswith("//") or selector.startswith("(//"):
+        js = """
+(function(){
+    var result = document.evaluate(XPATH, document, null,
+        XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+    var el = result.singleNodeValue;
+    if (!el) return 'not-found';
+    el.dispatchEvent(new MouseEvent('mouseover', {bubbles:true}));
+    el.dispatchEvent(new MouseEvent('mousedown', {bubbles:true}));
+    el.dispatchEvent(new MouseEvent('mouseup',   {bubbles:true}));
+    el.dispatchEvent(new MouseEvent('click',     {bubbles:true, cancelable:true}));
+    return 'clicked';
+})()
+        """.replace("XPATH", repr(selector))
+    else:
+        js = """
+(function(){
+    var el = document.querySelector(CSS);
+    if (!el) return 'not-found';
+    el.dispatchEvent(new MouseEvent('mouseover', {bubbles:true}));
+    el.dispatchEvent(new MouseEvent('mousedown', {bubbles:true}));
+    el.dispatchEvent(new MouseEvent('mouseup',   {bubbles:true}));
+    el.dispatchEvent(new MouseEvent('click',     {bubbles:true, cancelable:true}));
+    return 'clicked';
+})()
+        """.replace("CSS", repr(selector))
+    return sb.execute_script(js)
 
 
 # ============================================================
@@ -271,32 +293,52 @@ def wait_for_page_title(sb, keyword: str, timeout: int = 30) -> bool:
 
 def click_button_human(sb, xpaths: list) -> bool:
     """
-    依次尝试多个 XPath，找到可见按钮后用 ActionChains 模拟真实鼠标点击。
-    同时兜底用 JS MouseEvent。返回是否点击成功。
+    依次尝试多个 XPath/CSS，找到可见元素后：
+    1. 先用 JS scrollIntoView（通过 XPath/CSS 自查找，不传 arguments）
+    2. ActionChains 真实鼠标移动 + 点击
+    3. 失败则降级到 js_mouse_click
     """
     for sel in xpaths:
         try:
             if not sb.is_element_visible(sel):
                 continue
-            el = sb.find_element(sel)
-            # 滚动到可视区域
-            sb.execute_script("arguments[0].scrollIntoView({block:'center'});", el)
+
+            # 滚动到可视区域（不用 arguments，JS 内部自己查找元素）
+            if sel.startswith("//") or sel.startswith("(//"):
+                sb.execute_script("""
+(function(){
+    var r = document.evaluate(XPATH, document, null,
+        XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+    var el = r.singleNodeValue;
+    if (el) el.scrollIntoView({block:'center'});
+})()
+                """.replace("XPATH", repr(sel)))
+            else:
+                sb.execute_script("""
+(function(){
+    var el = document.querySelector(CSS);
+    if (el) el.scrollIntoView({block:'center'});
+})()
+                """.replace("CSS", repr(sel)))
+
             human_delay(0.2, 0.5)
+
             # ActionChains 真实鼠标移动 + 点击
+            el = sb.find_element(sel)
             ActionChains(sb.driver).move_to_element(el).pause(
                 random.uniform(0.1, 0.3)
             ).click().perform()
             print(f"✅ ActionChains 点击成功: {sel}")
             return True
+
         except Exception as e:
             print(f"⚠️  ActionChains 失败 ({sel}): {e}，尝试 JS click ...")
-            try:
-                el = sb.find_element(sel)
-                js_mouse_click(sb, el)
+            result = js_mouse_click(sb, sel)
+            if result == "clicked":
                 print(f"✅ JS MouseEvent 点击成功: {sel}")
                 return True
-            except Exception as e2:
-                print(f"⚠️  JS click 也失败: {e2}")
+            else:
+                print(f"⚠️  JS click 结果: {result}")
             continue
     return False
 
