@@ -2,7 +2,7 @@ name: 🎮 Velrix 自动续期
 
 on:
   schedule:
-    - cron: '0 2 */5 * *'      # 每5天 UTC 02:00 运行（可按需调整）
+    - cron: '0 2 */5 * *'      # 每天 UTC 02:00 运行（可按需调整）
   workflow_dispatch:           # 支持手动触发
 
 jobs:
@@ -22,14 +22,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      # ── 3. 安装 SeleniumBase ────────────────────────────────
-      - name: 📦 安装依赖
-        run: |
-          pip install seleniumbase
-          seleniumbase install chromedriver
-          sudo apt-get install -y xvfb
-
-      # ── 4. 启动 GOST 代理（仅在 Secret 存在时执行）─────────
+      # ── 3. 启动 GOST 代理（仅在 Secret 存在时执行）─────────
       - name: 🛡️ 启动 GOST 代理转发
         if: ${{ env.GOST_PROXY != '' }}
         env:
@@ -47,25 +40,38 @@ jobs:
           curl -s -x http://127.0.0.1:8080 https://api.ipify.org \
             | sed 's/\.[0-9]*$/.**/' && echo
 
-      # ── 5. 运行续期脚本 ─────────────────────────────────────
+      # ── 4. 安装系统依赖 ─────────────────────────────────────
+      - name: 🛠️ 安装系统依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            google-chrome-stable \
+            xvfb \
+            x11-utils
+
+      # ── 5. 安装 Python 依赖 ─────────────────────────────────
+      - name: 🐍 安装 Python 依赖
+        run: |
+          pip install seleniumbase
+          seleniumbase install uc_driver
+
+      # ── 6. 运行续期脚本 ─────────────────────────────────────
       - name: 🚀 运行续期脚本
         env:
-          # Secret 格式: username,gmail_address,gmail_app_password
+          PYTHONIOENCODING: utf-8
           VELRIX_ACCOUNT: ${{ secrets.VELRIX_ACCOUNT }}
-          # Secret 格式: tg_chat_id,bot_token
           TG_BOT:         ${{ secrets.TG_BOT }}
-          GOST_PROXY:     ${{ secrets.GOST_PROXY && 'http://127.0.0.1:8080' || '' }}
-          DISPLAY:        :99
+          GOST_PROXY:     ${{ secrets.GOST_PROXY }}
         run: |
-          Xvfb :99 -screen 0 1920x1080x24 &
-          sleep 2
-          python velrix_renew.py
+          xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python velrix_renew.py
 
-      # ── 6. 上传失败截图 ─────────────────────────────────────
-      - name: 📸 上传失败截图
-        if: failure()
+      # ── 7. 上传失败截图与源码 ───────────────────────────────
+      - name: 📸 上传截图与源码
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: failure-screenshots
-          path: "*.png"
+          name: debug-screenshots
+          path: |
+            *.png
+            *.html
           retention-days: 7
