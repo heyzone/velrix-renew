@@ -2,14 +2,16 @@ name: 🎮 Velrix 自动续期
 
 on:
   schedule:
-    - cron: '0 2 */5 * *'      # 每天 UTC 02:00 运行（可按需调整）
-  workflow_dispatch:           # 支持手动触发
+    - cron: '0 2 */5 * *'
+  workflow_dispatch:
 
 jobs:
   renew:
     name: 🔄 执行续期
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    env:
+      GOST_PROXY: ${{ secrets.GOST_PROXY }}
 
     steps:
       # ── 1. 拉取代码 ────────────────────────────────────────
@@ -25,8 +27,6 @@ jobs:
       # ── 3. 启动 GOST 代理（仅在 Secret 存在时执行）─────────
       - name: 🛡️ 启动 GOST 代理转发
         if: ${{ env.GOST_PROXY != '' }}
-        env:
-          GOST_PROXY: ${{ secrets.GOST_PROXY }}
         run: |
           VERSION=$(curl -s https://api.github.com/repos/ginuerzh/gost/releases/latest \
             | grep '"tag_name"' | cut -d'"' -f4 | tr -d 'v')
@@ -61,11 +61,10 @@ jobs:
           PYTHONIOENCODING: utf-8
           VELRIX_ACCOUNT: ${{ secrets.VELRIX_ACCOUNT }}
           TG_BOT:         ${{ secrets.TG_BOT }}
-          GOST_PROXY:     ${{ secrets.GOST_PROXY }}
         run: |
           xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python velrix_renew.py
 
-      # ── 7. 上传失败截图与源码 ───────────────────────────────
+      # ── 7. 上传截图与源码 ───────────────────────────────────
       - name: 📸 上传截图与源码
         if: always()
         uses: actions/upload-artifact@v4
