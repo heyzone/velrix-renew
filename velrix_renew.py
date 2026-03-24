@@ -16,7 +16,7 @@ VELRIX_USERNAME = _account[0].strip()          # Velrix 用户名
 GMAIL_ADDRESS   = _account[1].strip()          # Gmail 地址（接收验证码）
 GMAIL_PASSWORD  = _account[2].strip()          # Gmail App 密码
 
-LOCAL_PROXY  = os.environ.get("GOST_PROXY", "")
+LOCAL_PROXY  = "http://127.0.0.1:8080"   # GOST 本地转发地址（固定）
 RENEW_URL    = "https://www.velrix.net/flow/renew"
 
 _tg_raw = os.environ.get("TG_BOT", "")
@@ -357,11 +357,7 @@ def do_renew(sb) -> None:
 def run_script():
     print("🔧 启动浏览器...")
 
-    sb_kwargs = dict(uc=True, test=True)
-    if LOCAL_PROXY:
-        sb_kwargs["proxy"] = LOCAL_PROXY
-
-    with SB(**sb_kwargs) as sb:
+    with SB(uc=True, test=True, proxy=LOCAL_PROXY) as sb:
         print("🚀 浏览器就绪！")
 
         # ── IP 验证 ──────────────────────────────────────────
