@@ -201,40 +201,33 @@ def do_renew(sb) -> None:
         return
 
     # ── Step 2：等待 PIN 输入框 & 读取 OTP ───────────────────
-    print("⏳ 等待验证码输入框（最长 30s）...")
+    print("⏳ 等待「Verify Your Email」页面渲染（最长 30s）...")
 
-    # 给页面充分的渲染时间
-    time.sleep(3)
-
-    # 截图 + 打印页面源码，帮助调试选择器
-    sb.save_screenshot("velrix_after_continue.png")
-    try:
-        page_src = sb.get_page_source()
-        # 只打印包含 "pin" 或 "otp" 的行，避免刷屏
-        for line in page_src.splitlines():
-            if any(k in line.lower() for k in ["pin", "otp", "code", "verify", "input"]):
-                print("  [SRC]", line.strip()[:200])
-    except Exception as e:
-        print(f"⚠️  无法读取页面源码: {e}")
-
-    # 多种选择器逐一尝试
-    pin_found = False
-    pin_selectors = [
-        'input[aria-label="pin input 1 of 6"]',   # 原始
-        'input[aria-label^="pin input"]',           # 前缀匹配
-        'input[autocomplete="one-time-code"]',      # autocomplete 属性
-        'input[inputmode="text"][type="text"]',     # 通用 PIN 特征
-    ]
-    for sel in pin_selectors:
+    # 先轮询 h2 标题，确认 SPA 已切换到验证码步骤
+    verify_page_ready = False
+    for _ in range(30):
+        time.sleep(1)
         try:
-            sb.wait_for_element_visible(sel, timeout=8)
-            print(f"✅ PIN 输入框已找到（选择器: {sel}）")
-            pin_found = True
-            break
+            h2_text = sb.execute_script(
+                "(function(){ var h2 = document.querySelector('h2'); return h2 ? h2.innerText : ''; })()"
+            )
+            if h2_text and "Verify" in h2_text:
+                print(f"✅ 页面已切换到验证步骤: {h2_text}")
+                verify_page_ready = True
+                break
         except Exception:
-            print(f"   ↳ 选择器未匹配: {sel}")
+            pass
 
-    if not pin_found:
+    if not verify_page_ready:
+        print("⚠️  未检测到 Verify 标题，继续尝试查找 PIN 框...")
+
+    sb.save_screenshot("velrix_after_continue.png")
+
+    # 等待 PIN 输入框出现（用 autocomplete="one-time-code" 最稳定）
+    try:
+        sb.wait_for_element_visible('input[autocomplete="one-time-code"]', timeout=15)
+        print("✅ PIN 输入框已找到")
+    except Exception:
         print("❌ PIN 输入框加载失败，已保存截图和页面源码")
         sb.save_screenshot("velrix_no_pin.png")
         try:
