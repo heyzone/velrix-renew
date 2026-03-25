@@ -114,7 +114,7 @@ def js_mouse_click(sb, selector):
 
 
 # ============================================================
-# IMAP 读取 Gmail OTP（6位纯数字或大写字母）
+# IMAP 读取 Gmail OTP（支持字母数字混合，无差别搜全量邮件）
 # ============================================================
 
 def fetch_otp_from_gmail(wait_seconds: int = 90) -> str:
@@ -136,19 +136,21 @@ def fetch_otp_from_gmail(wait_seconds: int = 90) -> str:
 
     folders_to_check = ["INBOX"] + ([spam_folder] if spam_folder else [])
 
+    # 第一步：获取现有邮件作为基线 (修改为搜 ALL)
     seen_uids: dict[str, set] = {}
     for folder in folders_to_check:
         try:
             status, _ = mail.select(folder)
             if status != "OK":
                 raise Exception(f"select 失败: {status}")
-            _, data = mail.uid("search", None, 'FROM "velrix"')
+            _, data = mail.uid("search", None, "ALL") # <--- 关键修复：无差别获取所有 UID
             seen_uids[folder] = set(data[0].split())
-            print(f"📂 {folder} 已有 velrix 邮件: {len(seen_uids[folder])} 封")
+            print(f"📂 {folder} 已有邮件: {len(seen_uids[folder])} 封")
         except Exception as e:
             print(f"⚠️  初始化文件夹 {folder} 出错: {e}")
             seen_uids[folder] = set()
 
+    # 第二步：轮询新邮件
     while time.time() < deadline:
         time.sleep(5)
         for folder in folders_to_check:
@@ -156,7 +158,7 @@ def fetch_otp_from_gmail(wait_seconds: int = 90) -> str:
                 status, _ = mail.select(folder)
                 if status != "OK":
                     continue
-                _, data = mail.uid("search", None, 'FROM "velrix"')
+                _, data = mail.uid("search", None, "ALL") # <--- 关键修复：无差别比对
                 all_uids = set(data[0].split())
                 new_uids = all_uids - seen_uids[folder]
 
@@ -170,7 +172,7 @@ def fetch_otp_from_gmail(wait_seconds: int = 90) -> str:
                     msg = email.message_from_bytes(raw)
 
                     subject = msg.get("Subject", "")
-                    print(f"   📧 主题: {subject}")
+                    print(f"   📧 收到新邮件主题: {subject}")
 
                     body = ""
                     if msg.is_multipart():
@@ -188,18 +190,18 @@ def fetch_otp_from_gmail(wait_seconds: int = 90) -> str:
                     else:
                         body = msg.get_payload(decode=True).decode("utf-8", errors="ignore")
 
-                    # 新增正则：优先匹配 "code is: MAU2HX" 格式，兜底匹配连续 6 位字母数字
+                    # 正则匹配 6 位字母或数字组合
                     otp_match = re.search(r'code is:\s*([A-Z0-9]{6})', body, re.IGNORECASE)
                     if not otp_match:
                         otp_match = re.search(r'\b([A-Z0-9]{6})\b', body, re.IGNORECASE)
 
                     if otp_match:
                         code = otp_match.group(1).upper()
-                        print(f"✅ Gmail OTP 获取成功: {code}")
+                        print(f"✅ 成功从新邮件中提取 OTP: {code}")
                         mail.logout()
                         return code
                     else:
-                        print(f"   ⚠️ 未找到6位字母/数字验证码，邮件内容片段: {body[:120].strip()}")
+                        print(f"   ⚠️ 未找到6位字母/数字验证码，忽略此邮件。片段: {body[:80].strip()}")
 
             except Exception as e:
                 print(f"⚠️  轮询 {folder} 出错: {e}")
@@ -462,13 +464,30 @@ def do_renew(sb) -> None:
 
     print("✅ 验证码输入框已出现，开始获取 OTP ...")
 
+    # ========= 关键修复：加入两段式获取和页面 Resend 重发逻辑 =========
+    code = None
     try:
-        code = fetch_otp_from_gmail(wait_seconds=90)
-    except TimeoutError as e:
-        print(e)
-        save_debug(sb, "otp_timeout")
-        send_tg("❌ Gmail OTP 获取超时")
-        return
+        # 第一阶段：先耐心等 60 秒
+        code = fetch_otp_from_gmail(wait_seconds=60)
+    except TimeoutError:
+        print("⏳ 60秒未收到邮件，尝试点击网页上的 Resend 重新发送...")
+        try:
+            # 尝试点击截图上的 Resend 按钮
+            sb.click('//button[contains(., "Resend")]')
+            time.sleep(3)
+            print("✅ 已点击 Resend，等待第二波邮件...")
+        except Exception as e:
+            print(f"⚠️ 未能点击 Resend 按钮 ({e})，继续死等...")
+        
+        try:
+            # 第二阶段：再等 120 秒 (总共将近 3 分钟，足以应对绝大多数邮件延迟)
+            code = fetch_otp_from_gmail(wait_seconds=120)
+        except TimeoutError as e:
+            print(e)
+            save_debug(sb, "otp_timeout")
+            send_tg("❌ Gmail OTP 最终获取超时")
+            return
+    # ====================================================================
 
     print(f"⌨️  填入验证码: {code}")
     from selenium.webdriver.common.by import By
