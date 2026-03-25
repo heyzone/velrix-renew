@@ -118,7 +118,7 @@ def js_mouse_click(sb, selector):
 # IMAP 读取 Gmail OTP（6位）
 # ============================================================
 
-def fetch_otp_from_gmail(wait_seconds: int = 90) -> str:
+def fetch_otp_from_gmail(wait_seconds: int = 180) -> str:
     print(f"📬 连接 Gmail，最长等待 {wait_seconds}s ...")
     deadline = time.time() + wait_seconds
 
@@ -137,18 +137,21 @@ def fetch_otp_from_gmail(wait_seconds: int = 90) -> str:
 
     folders_to_check = ["INBOX"] + ([spam_folder] if spam_folder else [])
 
-    # 关键修复：seen_uids 基线只记录已有的 velrix 邮件 UID
-    # 避免把 ALL 邮件当基线导致 velrix 新邮件被漏掉，
-    # 也避免把非 velrix 旧邮件算进去干扰计算
     seen_uids: dict[str, set] = {}
     for folder in folders_to_check:
         try:
             status, _ = mail.select(folder)
             if status != "OK":
                 raise Exception(f"select 失败: {status}")
-            _, data = mail.uid("search", None, 'FROM "velrix"')
-            seen_uids[folder] = set(data[0].split())
-            print(f"📂 {folder} 已有 velrix 邮件: {len(seen_uids[folder])} 封")
+            baseline = set()
+            for search_term in ['FROM "velrix"', 'FROM "noreply"', 'SUBJECT "verification"', 'SUBJECT "verify"']:
+                try:
+                    _, data = mail.uid("search", None, search_term)
+                    baseline |= set(data[0].split())
+                except Exception:
+                    pass
+            seen_uids[folder] = baseline
+            print(f"📂 {folder} 基线邮件: {len(seen_uids[folder])} 封")
         except Exception as e:
             print(f"⚠️  初始化文件夹 {folder} 出错: {e}")
             seen_uids[folder] = set()
@@ -160,8 +163,16 @@ def fetch_otp_from_gmail(wait_seconds: int = 90) -> str:
                 status, _ = mail.select(folder)
                 if status != "OK":
                     continue
-                _, data = mail.uid("search", None, 'FROM "velrix"')
-                all_uids = set(data[0].split())
+
+                # 用多个关键词搜索，兼容不同发件人格式
+                all_uids = set()
+                for search_term in ['FROM "velrix"', 'FROM "noreply"', 'SUBJECT "verification"', 'SUBJECT "verify"']:
+                    try:
+                        _, data = mail.uid("search", None, search_term)
+                        all_uids |= set(data[0].split())
+                    except Exception:
+                        pass
+
                 new_uids = all_uids - seen_uids[folder]
 
                 if new_uids:
@@ -192,7 +203,11 @@ def fetch_otp_from_gmail(wait_seconds: int = 90) -> str:
                     else:
                         body = msg.get_payload(decode=True).decode("utf-8", errors="ignore")
 
-                    otp_match = re.search(r'\b(\d{6})\b', body)
+                    # OTP 格式：6位字母数字混合，如 MAU2HX
+                    otp_match = re.search(r'(?:code is:|code:)\s*([A-Z0-9]{6})\b', body, re.IGNORECASE)
+                    if not otp_match:
+                        # 兜底：匹配任意6位大写字母+数字组合
+                        otp_match = re.search(r'\b([A-Z0-9]{6})\b', body)
                     if otp_match:
                         code = otp_match.group(1)
                         print(f"✅ Gmail OTP 获取成功: {code}")
