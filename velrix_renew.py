@@ -247,22 +247,30 @@ def dismiss_privacy_modal(sb):
         time.sleep(1)
 
 def click_button_human(sb, selectors):
-    """依次尝试多个选择器，优先 ActionChains，降级 JS 模拟点击"""
+    """依次尝试多个选择器，优先 SeleniumBase 原生 click，降级 ActionChains 和 JS"""
     for sel in selectors:
         try:
-            if sb.is_element_visible(sel):
-                el = sb.find_element(sel)
-                ActionChains(sb.driver).move_to_element(el).click().perform()
-                return True
+            # SeleniumBase 原生 click() 自带等待、滚动和智能重试，是最稳健的方式
+            sb.click(sel, timeout=2)
+            return True
         except Exception:
-            pass
+            try:
+                # 降级 1: ActionChains 纯净鼠标流
+                if sb.is_element_visible(sel):
+                    el = sb.find_element(sel)
+                    ActionChains(sb.driver).move_to_element(el).click().perform()
+                    return True
+            except Exception:
+                pass
+
+        # 降级 2: JS 事件强制触发
         result = js_mouse_click(sb, sel)
         if result == "clicked":
             return True
     return False
 
 # ============================================================
-# 主流程（以文档1顺序为基准，精准修复4处）
+# 主流程
 # ============================================================
 
 def do_renew(sb):
@@ -282,23 +290,38 @@ def do_renew(sb):
 
     # 4. 点击 Continue —— 多策略确保按钮一定被点中
     print("🖱️  点击 Continue...")
-    continue_selectors = [
-        '//button[.//span[normalize-space()="Continue"]]',    # 精确匹配 span 文字
-        '//button[contains(normalize-space(.), "Continue")]', # 宽松匹配按钮文字
-        'button[type="submit"]',                              # CSS 兜底
-    ]
-    clicked = click_button_human(sb, continue_selectors)
-    if not clicked:
-        # 最终兜底：JS 遍历所有 button 找含 Continue 文字的
-        sb.execute_script("""
-            var btns = document.querySelectorAll('button');
-            for (var i = 0; i < btns.length; i++) {
-                if (btns[i].innerText.trim().includes('Continue')) {
-                    btns[i].click(); break;
+    
+    # 【核心修复 1】策略一：直接用回车键提交表单（无视按钮状态）
+    try:
+        sb.send_keys('input#username', '\n')
+        time.sleep(1)
+    except Exception:
+        pass
+
+    # 如果回车键没生效，执行按钮点击策略
+    if not sb.is_element_present('input[autocomplete="one-time-code"]'):
+        # 【核心修复 2】更新高兼容性的选择器字典
+        continue_selectors = [
+            'button:contains("Continue")',                        # SB 特有专属文本选择器
+            '//button[contains(normalize-space(.), "Continue")]', # 宽松匹配
+            '//button[.//span[contains(text(), "Continue")]]',    # 针对嵌套结构
+            'button[type="submit"]',                              # CSS 兜底
+        ]
+        clicked = click_button_human(sb, continue_selectors)
+        
+        if not clicked:
+            # 最终兜底：纯净 JS 遍历点击
+            sb.execute_script("""
+                var btns = document.querySelectorAll('button');
+                for (var i = 0; i < btns.length; i++) {
+                    if (btns[i].innerText.trim().includes('Continue')) {
+                        btns[i].click(); break;
+                    }
                 }
-            }
-        """)
-        print("⚠️  使用 JS 兜底点击 Continue")
+            """)
+            print("⚠️  使用 JS 兜底点击 Continue")
+    else:
+        print("✅ 检测到已通过回车键成功提交")
 
     # 5. 轮询邮件获取 OTP
     mail_status, otp_code = poll_for_otp(mail_conn, baselines, folders, wait_seconds=120)
@@ -320,11 +343,12 @@ def do_renew(sb):
     # 6. 等待 pin input 出现，逐格填写验证码
     print(f"⌨️  填入OTP: {otp_code}")
     try:
-        sb.wait_for_element_visible('input[aria-label="pin input 1 of 6"]', timeout=20)
+        sb.wait_for_element_visible('input[autocomplete="one-time-code"]', timeout=20)
         pin_inputs = sb.find_elements('input[aria-label*="pin input"]')
         if not pin_inputs:
             pin_inputs = sb.find_elements('input[autocomplete="one-time-code"]')
-        # 过滤掉 aria-hidden 的聚合隐藏 input
+        
+        # 过滤掉 aria-hidden="true" 的聚合隐藏输入框（防止报错）
         pin_inputs = [el for el in pin_inputs if el.get_attribute("aria-hidden") != "true"]
 
         if len(pin_inputs) >= 6:
@@ -344,7 +368,7 @@ def do_renew(sb):
     # 7. 点击 Verify Code
     print("🚀 点击 Verify Code...")
     verify_selectors = [
-        '//button[.//span[normalize-space()="Verify Code"]]',
+        'button:contains("Verify Code")',
         '//button[contains(normalize-space(.), "Verify Code")]',
         'button[type="submit"]',
     ]
@@ -361,7 +385,6 @@ def do_renew(sb):
         print("⚠️  使用 JS 兜底点击 Verify Code")
 
     # 8. 精确等待 div[data-slot="description"] 出现并读取结果
-    #    成功内容示例: "Server renewed successfully Next renewal due: 2026/3/25"
     print("⏳ 等待续期结果...")
     due_date = None
     succeeded = False
