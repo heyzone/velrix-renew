@@ -8,6 +8,7 @@ import urllib.request
 import urllib.parse
 from seleniumbase import SB
 from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.common.by import By
 
 # ============================================================
 # 配置（从环境变量读取）
@@ -168,14 +169,14 @@ def init_mail_client():
 def poll_for_otp(mail, baselines, folders, wait_seconds=120):
     """
     轮询新邮件，返回:
-      ("otp",   "G78JZT")   — 获取到验证码
-      ("skip",  None)       — 未到续期时间
-      ("fail",  None)       — 超时未收到邮件
+      ("otp",  "G78JZT")  — 获取到验证码
+      ("skip", None)      — 未到续期时间
+      ("fail", None)      — 超时未收到邮件
     """
     if not mail:
         return "fail", None
 
-    print(f"📨 等待OTP框...")
+    print(f"📨 等待OTP邮件，超时 {wait_seconds}s ...")
     deadline = time.time() + wait_seconds
 
     while time.time() < deadline:
@@ -203,17 +204,21 @@ def poll_for_otp(mail, baselines, folders, wait_seconds=120):
                     else:
                         body = msg.get_payload(decode=True).decode("utf-8", errors="ignore")
 
-                    # 检测未到续期时间
+                    # ① 检测未到续期时间
                     if "You recently renewed your server" in body or \
                        "Renewals are limited to once every 24 hours" in body:
-                        print("⏰ 邮件提示：未到续期时间，跳过本次续期")
+                        print("⏰ 未到续期时间，跳过本次续期")
                         return "skip", None
 
-                    # 提取验证码：Your verification code is: G78JZT
+                    # ② 精确提取验证码：Your verification code is: G78JZT
                     otp_match = re.search(
                         r'Your verification code is:\s*([A-Z0-9]{6})',
                         body, re.IGNORECASE
                     )
+                    if not otp_match:
+                        # 兜底：匹配独立的 6 位字母数字
+                        otp_match = re.search(r'\b([A-Z0-9]{6})\b', body, re.IGNORECASE)
+
                     if otp_match:
                         otp = otp_match.group(1).upper()
                         print(f"✅ Gmail OTP: {otp}")
@@ -241,20 +246,23 @@ def dismiss_privacy_modal(sb):
             break
         time.sleep(1)
 
-def click_button_human(sb, xpaths):
-    for sel in xpaths:
+def click_button_human(sb, selectors):
+    """依次尝试多个选择器，优先 ActionChains，降级 JS 模拟点击"""
+    for sel in selectors:
         try:
             if sb.is_element_visible(sel):
                 el = sb.find_element(sel)
                 ActionChains(sb.driver).move_to_element(el).click().perform()
                 return True
         except Exception:
-            if js_mouse_click(sb, sel) == "clicked":
-                return True
+            pass
+        result = js_mouse_click(sb, sel)
+        if result == "clicked":
+            return True
     return False
 
 # ============================================================
-# 主流程
+# 主流程（以文档1顺序为基准，精准修复4处）
 # ============================================================
 
 def do_renew(sb):
@@ -263,31 +271,43 @@ def do_renew(sb):
     sb.open(RENEW_URL)
     dismiss_privacy_modal(sb)
 
-    # 2. 初始化邮箱监控（打开页面后、输入用户名前，记录基线）
+    # 2. 初始化邮箱监控（打开页面后、输入用户名前建立基线）
     mail_conn, baselines, folders = init_mail_client()
 
     # 3. 输入用户名
     print(f"🆔 输入用户名: {VELRIX_USERNAME}")
     sb.wait_for_element_visible('input#username', timeout=15)
     sb.type('input#username', VELRIX_USERNAME)
+    human_delay()
 
-    # 4. 点击 Continue，触发验证码邮件发送
+    # 4. 点击 Continue —— 多策略确保按钮一定被点中
     print("🖱️  点击 Continue...")
-    continue_btn = [
-        '//button[.//span[contains(text(),"Continue")]]',
-        '//button[contains(., "Continue")]',
-        'button[type="submit"]',
+    continue_selectors = [
+        '//button[.//span[normalize-space()="Continue"]]',    # 精确匹配 span 文字
+        '//button[contains(normalize-space(.), "Continue")]', # 宽松匹配按钮文字
+        'button[type="submit"]',                              # CSS 兜底
     ]
-    click_button_human(sb, continue_btn)
+    clicked = click_button_human(sb, continue_selectors)
+    if not clicked:
+        # 最终兜底：JS 遍历所有 button 找含 Continue 文字的
+        sb.execute_script("""
+            var btns = document.querySelectorAll('button');
+            for (var i = 0; i < btns.length; i++) {
+                if (btns[i].innerText.trim().includes('Continue')) {
+                    btns[i].click(); break;
+                }
+            }
+        """)
+        print("⚠️  使用 JS 兜底点击 Continue")
 
-    # 5. 轮询邮件
+    # 5. 轮询邮件获取 OTP
     mail_status, otp_code = poll_for_otp(mail_conn, baselines, folders, wait_seconds=120)
     if mail_conn:
         mail_conn.logout()
 
     # 未到续期时间
     if mail_status == "skip":
-        send_tg("⏰ 未到续期时间，跳过本次")
+        send_tg("⏰ 未到续期时间，无需操作")
         return
 
     # OTP 获取失败
@@ -297,12 +317,14 @@ def do_renew(sb):
         send_tg("❌ OTP 获取失败")
         return
 
-    # 6. 等待 pin input 出现并填写验证码
+    # 6. 等待 pin input 出现，逐格填写验证码
     print(f"⌨️  填入OTP: {otp_code}")
     try:
         sb.wait_for_element_visible('input[aria-label="pin input 1 of 6"]', timeout=20)
-        pin_inputs = sb.find_elements('input[autocomplete="one-time-code"]')
-        # 过滤掉隐藏的聚合 input（aria-hidden）
+        pin_inputs = sb.find_elements('input[aria-label*="pin input"]')
+        if not pin_inputs:
+            pin_inputs = sb.find_elements('input[autocomplete="one-time-code"]')
+        # 过滤掉 aria-hidden 的聚合隐藏 input
         pin_inputs = [el for el in pin_inputs if el.get_attribute("aria-hidden") != "true"]
 
         if len(pin_inputs) >= 6:
@@ -310,8 +332,7 @@ def do_renew(sb):
                 pin_inputs[i].send_keys(char)
                 time.sleep(0.12)
         else:
-            # 回退：直接往第一个格子塞完整码
-            pin_inputs[0].send_keys(otp_code)
+            sb.type('input[autocomplete="one-time-code"]', otp_code)
 
         print("✅ OTP已填入")
     except Exception as e:
@@ -322,15 +343,25 @@ def do_renew(sb):
 
     # 7. 点击 Verify Code
     print("🚀 点击 Verify Code...")
-    verify_btn = [
-        '//button[.//span[contains(text(),"Verify Code")]]',
-        '//button[contains(., "Verify Code")]',
+    verify_selectors = [
+        '//button[.//span[normalize-space()="Verify Code"]]',
+        '//button[contains(normalize-space(.), "Verify Code")]',
         'button[type="submit"]',
     ]
-    click_button_human(sb, verify_btn)
+    clicked = click_button_human(sb, verify_selectors)
+    if not clicked:
+        sb.execute_script("""
+            var btns = document.querySelectorAll('button');
+            for (var i = 0; i < btns.length; i++) {
+                if (btns[i].innerText.trim().includes('Verify Code')) {
+                    btns[i].click(); break;
+                }
+            }
+        """)
+        print("⚠️  使用 JS 兜底点击 Verify Code")
 
-    # 8. 精确等待结果元素 div[data-slot="description"]
-    # 内容示例："Server renewed successfully Next renewal due: 2026/3/25"
+    # 8. 精确等待 div[data-slot="description"] 出现并读取结果
+    #    成功内容示例: "Server renewed successfully Next renewal due: 2026/3/25"
     print("⏳ 等待续期结果...")
     due_date = None
     succeeded = False
@@ -339,24 +370,26 @@ def do_renew(sb):
         try:
             desc_el = sb.find_element('div[data-slot="description"]')
             desc_text = desc_el.text.strip()
-            if desc_text:
-                print(f"📋 页面返回: {desc_text}")
+            if not desc_text:
+                time.sleep(1)
+                continue
 
-                # 成功：包含 "successfully"
-                if "successfully" in desc_text.lower():
-                    # 提取日期，格式 2026/3/25
-                    m = re.search(r'(\d{4}/\d{1,2}/\d{1,2})', desc_text)
-                    if m:
-                        due_date = m.group(1)
-                    succeeded = True
-                    break
+            print(f"📋 页面返回: {desc_text}")
 
-                # 失败提示（如还有冷却）
-                if any(kw in desc_text.lower() for kw in ["renew again", "limited", "error", "failed", "invalid"]):
-                    print("⚠️  页面返回失败提示，终止")
-                    save_debug(sb, "renew_fail")
-                    send_tg(f"❌ 续期失败：{desc_text}")
-                    return
+            if "successfully" in desc_text.lower():
+                m = re.search(r'(\d{4}/\d{1,2}/\d{1,2})', desc_text)
+                if m:
+                    due_date = m.group(1)
+                succeeded = True
+                break
+
+            # 冷却期 / 错误提示
+            if any(kw in desc_text.lower() for kw in
+                   ["renew again", "limited", "error", "failed", "invalid", "recently renewed"]):
+                print("⚠️  页面返回失败提示，终止")
+                save_debug(sb, "renew_fail")
+                send_tg(f"❌ 续期失败：{desc_text[:80]}")
+                return
 
         except Exception:
             pass
