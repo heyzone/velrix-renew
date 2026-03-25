@@ -84,7 +84,6 @@ def human_delay(lo=0.6, hi=1.4):
 
 def js_mouse_click(sb, selector):
     """用 JS MouseEvent 触发点击，兼容 React/Vue 事件系统。selector 为 CSS 选择器。"""
-    # 将 XPath 转为通过 document.evaluate 查找，CSS selector 直接用 querySelector
     if selector.startswith("//") or selector.startswith("(//"):
         js = """
 (function(){
@@ -115,10 +114,10 @@ def js_mouse_click(sb, selector):
 
 
 # ============================================================
-# IMAP 读取 Gmail OTP（6位）
+# IMAP 读取 Gmail OTP（6位纯数字或大写字母）
 # ============================================================
 
-def fetch_otp_from_gmail(wait_seconds: int = 180) -> str:
+def fetch_otp_from_gmail(wait_seconds: int = 90) -> str:
     print(f"📬 连接 Gmail，最长等待 {wait_seconds}s ...")
     deadline = time.time() + wait_seconds
 
@@ -143,15 +142,9 @@ def fetch_otp_from_gmail(wait_seconds: int = 180) -> str:
             status, _ = mail.select(folder)
             if status != "OK":
                 raise Exception(f"select 失败: {status}")
-            baseline = set()
-            for search_term in ['FROM "velrix"', 'FROM "noreply"', 'SUBJECT "verification"', 'SUBJECT "verify"']:
-                try:
-                    _, data = mail.uid("search", None, search_term)
-                    baseline |= set(data[0].split())
-                except Exception:
-                    pass
-            seen_uids[folder] = baseline
-            print(f"📂 {folder} 基线邮件: {len(seen_uids[folder])} 封")
+            _, data = mail.uid("search", None, 'FROM "velrix"')
+            seen_uids[folder] = set(data[0].split())
+            print(f"📂 {folder} 已有 velrix 邮件: {len(seen_uids[folder])} 封")
         except Exception as e:
             print(f"⚠️  初始化文件夹 {folder} 出错: {e}")
             seen_uids[folder] = set()
@@ -163,16 +156,8 @@ def fetch_otp_from_gmail(wait_seconds: int = 180) -> str:
                 status, _ = mail.select(folder)
                 if status != "OK":
                     continue
-
-                # 用多个关键词搜索，兼容不同发件人格式
-                all_uids = set()
-                for search_term in ['FROM "velrix"', 'FROM "noreply"', 'SUBJECT "verification"', 'SUBJECT "verify"']:
-                    try:
-                        _, data = mail.uid("search", None, search_term)
-                        all_uids |= set(data[0].split())
-                    except Exception:
-                        pass
-
+                _, data = mail.uid("search", None, 'FROM "velrix"')
+                all_uids = set(data[0].split())
                 new_uids = all_uids - seen_uids[folder]
 
                 if new_uids:
@@ -203,18 +188,18 @@ def fetch_otp_from_gmail(wait_seconds: int = 180) -> str:
                     else:
                         body = msg.get_payload(decode=True).decode("utf-8", errors="ignore")
 
-                    # OTP 格式：6位字母数字混合，如 MAU2HX
-                    otp_match = re.search(r'(?:code is:|code:)\s*([A-Z0-9]{6})\b', body, re.IGNORECASE)
+                    # 新增正则：优先匹配 "code is: MAU2HX" 格式，兜底匹配连续 6 位字母数字
+                    otp_match = re.search(r'code is:\s*([A-Z0-9]{6})', body, re.IGNORECASE)
                     if not otp_match:
-                        # 兜底：匹配任意6位大写字母+数字组合
-                        otp_match = re.search(r'\b([A-Z0-9]{6})\b', body)
+                        otp_match = re.search(r'\b([A-Z0-9]{6})\b', body, re.IGNORECASE)
+
                     if otp_match:
-                        code = otp_match.group(1)
+                        code = otp_match.group(1).upper()
                         print(f"✅ Gmail OTP 获取成功: {code}")
                         mail.logout()
                         return code
                     else:
-                        print(f"   ⚠️  未找到6位数字，邮件内容片段: {body[:120].strip()}")
+                        print(f"   ⚠️ 未找到6位字母/数字验证码，邮件内容片段: {body[:120].strip()}")
 
             except Exception as e:
                 print(f"⚠️  轮询 {folder} 出错: {e}")
@@ -317,18 +302,11 @@ def wait_for_page_title(sb, keyword: str, timeout: int = 30) -> bool:
 # ============================================================
 
 def click_button_human(sb, xpaths: list) -> bool:
-    """
-    依次尝试多个 XPath/CSS，找到可见元素后：
-    1. 先用 JS scrollIntoView（通过 XPath/CSS 自查找，不传 arguments）
-    2. ActionChains 真实鼠标移动 + 点击
-    3. 失败则降级到 js_mouse_click
-    """
     for sel in xpaths:
         try:
             if not sb.is_element_visible(sel):
                 continue
 
-            # 滚动到可视区域（不用 arguments，JS 内部自己查找元素）
             if sel.startswith("//") or sel.startswith("(//"):
                 sb.execute_script("""
 (function(){
@@ -348,7 +326,6 @@ def click_button_human(sb, xpaths: list) -> bool:
 
             human_delay(0.2, 0.5)
 
-            # ActionChains 真实鼠标移动 + 点击
             el = sb.find_element(sel)
             ActionChains(sb.driver).move_to_element(el).pause(
                 random.uniform(0.1, 0.3)
@@ -402,7 +379,6 @@ def do_renew(sb) -> None:
 
     dismiss_privacy_modal(sb)
 
-    # ── Step 1：输入用户名
     print("📝 等待用户名输入框...")
     try:
         sb.wait_for_element_visible('input#username', timeout=20)
@@ -412,14 +388,12 @@ def do_renew(sb) -> None:
         send_tg("❌ 用户名输入框加载失败")
         return
 
-    # 先点击输入框，再逐字符输入（更像真实人类）
     sb.click('input#username')
     human_delay(0.3, 0.6)
     sb.type('input#username', VELRIX_USERNAME)
     print(f"✅ 已输入用户名: {VELRIX_USERNAME}")
-    human_delay(0.8, 1.5)   # 输入完等一会儿再点按钮
+    human_delay(0.8, 1.5)
 
-    # 点击 Continue（JS 双保险）
     print("🖱️  点击 Continue ...")
     continue_xpaths = [
         '//button[.//span[contains(text(),"Continue")]]',
@@ -433,10 +407,8 @@ def do_renew(sb) -> None:
         send_tg("❌ Continue 按钮未找到")
         return
 
-    # 点击后等待并检测页面状态
     time.sleep(2)
 
-    # 优先检测"不可续期"提示（冷却时间未到）
     not_available = sb.execute_script("""
 (function(){
     var keywords = ['not available', 'renew again', 'hour(s)', 'hours', '24 hour', 'cooldown', 'limit'];
@@ -458,17 +430,14 @@ def do_renew(sb) -> None:
         send_tg(wait_msg)
         return
 
-    # 检测其他错误提示（用户名不存在等）
     err = get_page_error(sb)
     if err:
         print(f"❌ 点击 Continue 后页面报错: {err}")
         send_tg(f"❌ Continue 被拒绝: {err}")
         return
 
-    # ── Step 2：等待页面切换到验证步骤 ───────────────────────
     wait_for_page_title(sb, "Verify", timeout=40)
 
-    # 等待 PIN 输入框
     pin_sel = None
     for sel in [
         'input[autocomplete="one-time-code"]',
@@ -501,14 +470,12 @@ def do_renew(sb) -> None:
         send_tg("❌ Gmail OTP 获取超时")
         return
 
-    # ── 填入验证码（6格独立输入框，逐格 sendKeys）────────────
     print(f"⌨️  填入验证码: {code}")
     from selenium.webdriver.common.by import By
     from selenium.webdriver.common.keys import Keys
 
     pin_inputs = sb.driver.find_elements(By.CSS_SELECTOR, 'input[aria-label*="pin input"]')
     if not pin_inputs:
-        # 兜底：所有 one-time-code input
         pin_inputs = sb.driver.find_elements(By.CSS_SELECTOR, 'input[autocomplete="one-time-code"]')
 
     if len(pin_inputs) >= 6:
@@ -520,7 +487,6 @@ def do_renew(sb) -> None:
             time.sleep(random.uniform(0.08, 0.15))
         print("✅ 验证码已填入（sendKeys 多格子模式）")
     else:
-        # 兜底：JS nativeSetter 整体填入
         sb.execute_script("""
 (function(){
     var inputs = document.querySelectorAll('input[aria-label*="pin input"], input[autocomplete="one-time-code"]');
@@ -542,7 +508,6 @@ def do_renew(sb) -> None:
         print("✅ 验证码已填入（JS 兜底模式）")
     human_delay(0.5, 1.0)
 
-    # 点击 Verify Code
     print("🚀 点击 Verify Code ...")
     verify_xpaths = [
         '//button[.//span[contains(text(),"Verify Code")]]',
@@ -556,7 +521,6 @@ def do_renew(sb) -> None:
         send_tg("❌ Verify Code 按钮未找到")
         return
 
-    # ── Step 3：等待续期结果 ──────────────────────────────────
     print("⏳ 等待续期结果...")
     due_date  = None
     succeeded = False
