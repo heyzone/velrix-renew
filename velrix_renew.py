@@ -40,6 +40,7 @@ def now_str():
     return datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
 def calc_remaining(due_date_str: str) -> str:
+    """根据到期日字符串计算剩余时间，格式如 '2026/3/25'"""
     import datetime
     try:
         due = datetime.datetime.strptime(due_date_str.strip(), "%Y/%m/%d")
@@ -61,6 +62,7 @@ def calc_remaining(due_date_str: str) -> str:
 
 def send_tg(result: str, due_date: str = None):
     remaining = calc_remaining(due_date) if due_date else None
+
     lines = [
         "🎮 Velrix 服务器续期通知",
         f"🕐 运行时间: {now_str()}",
@@ -71,7 +73,9 @@ def send_tg(result: str, due_date: str = None):
         lines.append(f"📅 下次到期: {due_date}")
     if remaining:
         lines.append(f"⏱️ 剩余时间: {remaining}")
+
     msg = "\n".join(lines)
+
     if not TG_TOKEN or not TG_CHAT_ID:
         print("⚠️  Telegram 未配置，跳过推送")
         return
@@ -126,13 +130,8 @@ def js_mouse_click(sb, selector):
     return sb.execute_script(js)
 
 # ============================================================
-# IMAP 逻辑（修复版）
+# IMAP 逻辑
 # ============================================================
-
-def _imap_select(mail, folder):
-    """安全 select：含斜杠的文件夹名加引号"""
-    folder_quoted = f'"{folder}"' if "/" in folder else folder
-    return mail.select(folder_quoted)
 
 def init_mail_client():
     """建立连接并返回已选定文件夹的 mail 对象和 seen_uids 基线"""
@@ -145,10 +144,7 @@ def init_mail_client():
         for f in folder_list:
             decoded = f.decode("utf-8", errors="ignore")
             if any(k in decoded for k in ["Spam", "Junk", "垃圾", "spam", "junk"]):
-                # 提取最后一段（文件夹名），保留原始大小写和斜杠
-                match = re.search(r'"([^"]+)"\s*$', decoded)
-                if not match:
-                    match = re.search(r'(\S+)\s*$', decoded)
+                match = re.search(r'"([^"]+)"\s*$', decoded) or re.search(r'(\S+)\s*$', decoded)
                 if match:
                     spam_folder = match.group(1).strip('"')
                     break
@@ -157,17 +153,14 @@ def init_mail_client():
         baselines = {}
 
         for f in folders:
-            status, _ = _imap_select(mail, f)
+            status, _ = mail.select(f)
             if status == "OK":
                 _, data = mail.uid("search", None, "ALL")
                 baselines[f] = set(data[0].split())
-            else:
-                print(f"⚠️  无法选择文件夹: {f}")
 
-        print(f"📬 连接Gmail成功，监控文件夹: {folders}")
-        print(f"📊 各文件夹基线UID数: { {k: len(v) for k, v in baselines.items()} }")
+        print("📬 连接Gmail，等待验证码邮件...")
         if spam_folder:
-            print(f"🗑️  同时检查垃圾邮箱: {spam_folder}")
+            print("🗑️  检查Gmail垃圾邮箱")
         return mail, baselines, folders
     except Exception as e:
         print(f"❌ 邮箱连接失败: {e}")
@@ -190,26 +183,17 @@ def poll_for_otp(mail, baselines, folders, wait_seconds=120):
         time.sleep(4)
         for f in folders:
             try:
-                status, _ = _imap_select(mail, f)
-                if status != "OK":
-                    continue
-
+                mail.select(f)
                 _, data = mail.uid("search", None, "ALL")
                 current_uids = set(data[0].split())
-                new_uids = current_uids - baselines.get(f, set())
+                new_uids = current_uids - baselines[f]
 
                 if not new_uids:
                     continue
 
-                print(f"📩 [{f}] 发现 {len(new_uids)} 封新邮件，开始解析...")
-
                 for uid in new_uids:
                     _, msg_data = mail.uid("fetch", uid, "(RFC822)")
                     msg = email.message_from_bytes(msg_data[0][1])
-
-                    subject = msg.get("Subject", "")
-                    sender  = msg.get("From", "")
-                    print(f"  📧 发件人: {sender} | 主题: {subject}")
 
                     body = ""
                     if msg.is_multipart():
@@ -217,45 +201,31 @@ def poll_for_otp(mail, baselines, folders, wait_seconds=120):
                             if part.get_content_type() == "text/plain":
                                 body = part.get_payload(decode=True).decode("utf-8", errors="ignore")
                                 break
-                        # 纯文本为空时尝试 HTML
-                        if not body:
-                            for part in msg.walk():
-                                if part.get_content_type() == "text/html":
-                                    body = part.get_payload(decode=True).decode("utf-8", errors="ignore")
-                                    break
                     else:
                         body = msg.get_payload(decode=True).decode("utf-8", errors="ignore")
 
-                    # 去除 HTML 标签（简单处理）
-                    body_plain = re.sub(r'<[^>]+>', ' ', body)
-
                     # ① 检测未到续期时间
-                    if "You recently renewed your server" in body_plain or \
-                       "Renewals are limited to once every 24 hours" in body_plain:
+                    if "You recently renewed your server" in body or \
+                       "Renewals are limited to once every 24 hours" in body:
                         print("⏰ 未到续期时间，跳过本次续期")
                         return "skip", None
 
                     # ② 精确提取验证码：Your verification code is: G78JZT
                     otp_match = re.search(
                         r'Your verification code is:\s*([A-Z0-9]{6})',
-                        body_plain, re.IGNORECASE
+                        body, re.IGNORECASE
                     )
+                    if not otp_match:
+                        # 兜底：匹配独立的 6 位字母数字
+                        otp_match = re.search(r'\b([A-Z0-9]{6})\b', body, re.IGNORECASE)
+
                     if otp_match:
                         otp = otp_match.group(1).upper()
-                        print(f"✅ Gmail OTP (精确匹配): {otp}")
+                        print(f"✅ Gmail OTP: {otp}")
                         return "otp", otp
 
-                    # ③ 宽松兜底：在含关键词的行附近匹配 6 位码
-                    for line in body_plain.splitlines():
-                        if any(kw in line.lower() for kw in ["code", "verify", "otp", "token", "verification"]):
-                            loose = re.search(r'\b([A-Z0-9]{6})\b', line, re.IGNORECASE)
-                            if loose:
-                                otp = loose.group(1).upper()
-                                print(f"✅ Gmail OTP (宽松匹配): {otp} | 来源行: {line.strip()[:80]}")
-                                return "otp", otp
-
             except Exception as e:
-                print(f"⚠️  邮件轮询异常 [{f}]: {e}")
+                print(f"⚠️  邮件轮询异常: {e}")
 
     return "fail", None
 
@@ -277,83 +247,70 @@ def dismiss_privacy_modal(sb):
         time.sleep(1)
 
 def click_button_human(sb, selectors):
+    """依次尝试多个选择器，优先 SeleniumBase 原生 click，降级 ActionChains 和 JS"""
     for sel in selectors:
         try:
+            # SeleniumBase 原生 click() 自带等待、滚动和智能重试，是最稳健的方式
             sb.click(sel, timeout=2)
-            print(f"✅ 点击成功: {sel}")
             return True
         except Exception:
             try:
+                # 降级 1: ActionChains 纯净鼠标流
                 if sb.is_element_visible(sel):
                     el = sb.find_element(sel)
                     ActionChains(sb.driver).move_to_element(el).click().perform()
-                    print(f"✅ ActionChains 点击成功: {sel}")
                     return True
             except Exception:
                 pass
 
+        # 降级 2: JS 事件强制触发
         result = js_mouse_click(sb, sel)
         if result == "clicked":
-            print(f"✅ JS 点击成功: {sel}")
             return True
     return False
-
-def wait_for_otp_input(sb, timeout=15):
-    """等待 OTP 输入框出现，返回 True/False"""
-    try:
-        sb.wait_for_element_visible('input[autocomplete="one-time-code"]', timeout=timeout)
-        return True
-    except Exception:
-        return False
 
 # ============================================================
 # 主流程
 # ============================================================
 
 def do_renew(sb):
-    # 【修复】先建立邮件基线，再打开页面，避免竞态
-    print("📬 预先建立邮件基线...")
-    mail_conn, baselines, folders = init_mail_client()
-
     # 1. 打开续期页面
     print("🌐 打开续期页面...")
     sb.open(RENEW_URL)
     dismiss_privacy_modal(sb)
-    time.sleep(2)
-    save_debug(sb, "page_loaded")
 
-    # 2. 输入用户名
+    # 2. 初始化邮箱监控（打开页面后、输入用户名前建立基线）
+    mail_conn, baselines, folders = init_mail_client()
+
+    # 3. 输入用户名
     print(f"🆔 输入用户名: {VELRIX_USERNAME}")
     sb.wait_for_element_visible('input#username', timeout=15)
     sb.type('input#username', VELRIX_USERNAME)
     human_delay()
 
-    # 3. 点击 Continue —— 多策略
+    # 4. 点击 Continue —— 多策略确保按钮一定被点中
     print("🖱️  点击 Continue...")
-
-    # 策略一：回车键
+    
+    # 【核心修复 1】策略一：直接用回车键提交表单（无视按钮状态）
     try:
         sb.send_keys('input#username', '\n')
-        print("  ↳ 已发送回车键")
-    except Exception as e:
-        print(f"  ↳ 回车键失败: {e}")
+        time.sleep(1)
+    except Exception:
+        pass
 
-    # 等待页面响应
-    time.sleep(3)
-    save_debug(sb, "after_continue")
-
-    # 检查 OTP 输入框是否已出现
-    if not wait_for_otp_input(sb, timeout=5):
-        print("  ↳ 回车键未生效，尝试点击按钮...")
+    # 如果回车键没生效，执行按钮点击策略
+    if not sb.is_element_present('input[autocomplete="one-time-code"]'):
+        # 【核心修复 2】更新高兼容性的选择器字典
         continue_selectors = [
-            'button:contains("Continue")',
-            '//button[contains(normalize-space(.), "Continue")]',
-            '//button[.//span[contains(text(), "Continue")]]',
-            'button[type="submit"]',
+            'button:contains("Continue")',                        # SB 特有专属文本选择器
+            '//button[contains(normalize-space(.), "Continue")]', # 宽松匹配
+            '//button[.//span[contains(text(), "Continue")]]',    # 针对嵌套结构
+            'button[type="submit"]',                              # CSS 兜底
         ]
         clicked = click_button_human(sb, continue_selectors)
-
+        
         if not clicked:
+            # 最终兜底：纯净 JS 遍历点击
             sb.execute_script("""
                 var btns = document.querySelectorAll('button');
                 for (var i = 0; i < btns.length; i++) {
@@ -362,67 +319,53 @@ def do_renew(sb):
                     }
                 }
             """)
-            print("  ↳ JS 兜底点击 Continue")
-
-        time.sleep(3)
-        save_debug(sb, "after_continue_btn")
-
-        if not wait_for_otp_input(sb, timeout=10):
-            print("❌ Continue 后未出现 OTP 输入框，请检查快照")
-            save_debug(sb, "continue_failed")
-            if mail_conn:
-                mail_conn.logout()
-            send_tg("❌ Continue 步骤失败，OTP 输入框未出现")
-            return
+            print("⚠️  使用 JS 兜底点击 Continue")
     else:
-        print("✅ OTP 输入框已出现")
+        print("✅ 检测到已通过回车键成功提交")
 
-    # 4. 轮询邮件获取 OTP
+    # 5. 轮询邮件获取 OTP
     mail_status, otp_code = poll_for_otp(mail_conn, baselines, folders, wait_seconds=120)
     if mail_conn:
-        try:
-            mail_conn.logout()
-        except Exception:
-            pass
+        mail_conn.logout()
 
+    # 未到续期时间
     if mail_status == "skip":
         send_tg("⏰ 未到续期时间，无需操作")
         return
 
+    # OTP 获取失败
     if mail_status == "fail" or not otp_code:
         print("❌ 验证码获取超时，流程终止")
         save_debug(sb, "otp_fail")
         send_tg("❌ OTP 获取失败")
         return
 
-    # 5. 填写验证码
+    # 6. 等待 pin input 出现，逐格填写验证码
     print(f"⌨️  填入OTP: {otp_code}")
     try:
         sb.wait_for_element_visible('input[autocomplete="one-time-code"]', timeout=20)
         pin_inputs = sb.find_elements('input[aria-label*="pin input"]')
         if not pin_inputs:
             pin_inputs = sb.find_elements('input[autocomplete="one-time-code"]')
-
-        # 过滤掉 aria-hidden 的聚合输入框
+        
+        # 过滤掉 aria-hidden="true" 的聚合隐藏输入框（防止报错）
         pin_inputs = [el for el in pin_inputs if el.get_attribute("aria-hidden") != "true"]
-        print(f"🔢 有效 pin inputs 数量: {len(pin_inputs)}")
 
         if len(pin_inputs) >= 6:
             for i, char in enumerate(otp_code):
                 pin_inputs[i].send_keys(char)
-                time.sleep(0.15)
+                time.sleep(0.12)
         else:
             sb.type('input[autocomplete="one-time-code"]', otp_code)
 
         print("✅ OTP已填入")
-        save_debug(sb, "otp_filled")
     except Exception as e:
         print(f"❌ 验证码填写失败: {e}")
         save_debug(sb, "input_error")
         send_tg("❌ 验证码填写失败")
         return
 
-    # 6. 点击 Verify Code
+    # 7. 点击 Verify Code
     print("🚀 点击 Verify Code...")
     verify_selectors = [
         'button:contains("Verify Code")',
@@ -439,9 +382,9 @@ def do_renew(sb):
                 }
             }
         """)
-        print("  ↳ JS 兜底点击 Verify Code")
+        print("⚠️  使用 JS 兜底点击 Verify Code")
 
-    # 7. 等待续期结果
+    # 8. 精确等待 div[data-slot="description"] 出现并读取结果
     print("⏳ 等待续期结果...")
     due_date = None
     succeeded = False
@@ -463,6 +406,7 @@ def do_renew(sb):
                 succeeded = True
                 break
 
+            # 冷却期 / 错误提示
             if any(kw in desc_text.lower() for kw in
                    ["renew again", "limited", "error", "failed", "invalid", "recently renewed"]):
                 print("⚠️  页面返回失败提示，终止")
