@@ -2,7 +2,7 @@ name: 🎮 Velrix 自动续期
 
 on:
   schedule:
-    - cron: '0 2 */5 * *'
+    - cron: '0 2 * * *'
   workflow_dispatch:
 
 jobs:
